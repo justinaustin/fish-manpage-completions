@@ -1,4 +1,5 @@
 /// A translation of https://github.com/fish-shell/fish-shell/blob/e7bfd1d71ca54df726a4f1ea14bd6b0957b75752/share/tools/create_manpage_completions.py
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -76,6 +77,7 @@ struct App {
     verbosity: Verbosity,
     diagnostic_output: String,
     diagnostic_indent: usize,
+    already_output_completions: HashMap<String, HashSet<String>>,
 }
 
 // def add_diagnostic(dgn, msg_verbosity = VERY_VERBOSE):
