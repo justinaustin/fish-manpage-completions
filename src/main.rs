@@ -59,6 +59,16 @@ use structopt::StructOpt;
 // global VERBOSITY, WRITE_TO_STDOUT, DEROFF_ONLY
 // VERBOSITY, WRITE_TO_STDOUT, DEROFF_ONLY = NOT_VERBOSE, False, False
 //
+
+macro_rules! regex {
+    ($pattern: expr) => {{
+        lazy_static::lazy_static! {
+            static ref REGEX: regex::Regex = regex::Regex::new($pattern).unwrap();
+        }
+        &REGEX
+    }};
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Verbosity {
     Not,
@@ -180,7 +190,7 @@ fn fish_escape_single_quote(string: String) -> String {
 //     return s.decode('latin-1', 'ignore')
 
 fn lossy_unicode(bytes: &[u8]) -> String {
-    unimplemented!()
+    String::from_utf8_lossy(bytes).into_owned()
 }
 
 // def output_complete_command(cmdname, args, description, output_list):
@@ -192,19 +202,15 @@ fn lossy_unicode(bytes: &[u8]) -> String {
 //     output_list.append(lossy_unicode(' ').join([lossy_unicode(c) for c in comps]))
 
 fn output_complete_command(
-    cmdname: &str,
-    args: impl Iterator<Item = String>,
+    cmdname: String,
+    args: Vec<String>,
     description: &str,
     output_list: &mut Vec<String>,
 ) {
     output_list.push(complete_command(cmdname, args, description));
 }
 
-fn complete_command(
-    cmdname: &str,
-    mut args: impl Iterator<Item = String>,
-    description: &str,
-) -> String {
+fn complete_command(cmdname: String, args: Vec<String>, description: &str) -> String {
     format!(
         "complete --command {cmdname} {args}{description_flag}{description}",
         cmdname = cmdname,
@@ -218,93 +224,111 @@ fn complete_command(
     )
 }
 
-// def built_command(options, description):
-// #    print "Options are: ", options
-//     man_optionlist = re.split(" |,|\"|=|[|]", options)
-//     fish_options = []
-//     for optionstr in man_optionlist:
-//         option = re.sub(r"(\[.*\])", "", optionstr)
-//         option = option.strip(" \t\r\n[](){}.,:!")
-//
-//
-//         # Skip some problematic cases
-//         if option in ['-', '--']: continue
-//         if any(c in "{}()" for c in option): continue
-//
-//         if option.startswith('--'):
-//             # New style long option (--recursive)
-//             fish_options.append('-l ' + fish_escape_single_quote(option[2:]))
-//         elif option.startswith('-') and len(option) == 2:
-//             # New style short option (-r)
-//             fish_options.append('-s ' + fish_escape_single_quote(option[1:]))
-//         elif option.startswith('-') and len(option) > 2:
-//             # Old style long option (-recursive)
-//             fish_options.append('-o ' + fish_escape_single_quote(option[1:]))
-//
-//     # Determine which options are new (not already in existing_options)
-//     # Then add those to the existing options
-//     existing_options = already_output_completions.setdefault(CMDNAME, set())
-//     fish_options = [opt for opt in fish_options if opt not in existing_options]
-//     existing_options.update(fish_options)
-//
-//     # Maybe it's all for naught
-//     if not fish_options: return
-//
-//     # Here's what we'll use to truncate if necessary
-//     max_description_width = 78
-//     if IS_PY3:
-//         truncation_suffix = '…'
-//     else:
-//         ELLIPSIS_CODE_POINT = 0x2026
-//         truncation_suffix = unichr(ELLIPSIS_CODE_POINT)
-//
-//     # Try to include as many whole sentences as will fit
-//     # Clean up some probably bogus escapes in the process
-//     clean_desc = description.replace("\\'", "'").replace("\\.", ".")
-//     sentences = clean_desc.split('.')
-//
-//     # Clean up "sentences" that are just whitespace
-//     # But don't let it be empty
-//     sentences = [x for x in sentences if x.strip()]
-//     if not sentences: sentences = ['']
-//
-//     udot = lossy_unicode('.')
-//     uspace = lossy_unicode(' ')
-//
-//     truncated_description = lossy_unicode(sentences[0]) + udot
-//     for line in sentences[1:]:
-//         if not line: continue
-//         proposed_description = lossy_unicode(truncated_description) + uspace + lossy_unicode(line) + udot
-//         if len(proposed_description) <= max_description_width:
-//             # It fits
-//             truncated_description = proposed_description
-//         else:
-//             # No fit
-//             break
-//
-//     # If the first sentence does not fit, truncate if necessary
-//     if len(truncated_description) > max_description_width:
-//         prefix_len = max_description_width - len(truncation_suffix)
-//         truncated_description = truncated_description[:prefix_len] + truncation_suffix
-//
-//     # Escape some more things
-//     truncated_description = fish_escape_single_quote(truncated_description)
-//     escaped_cmd = fish_escape_single_quote(CMDNAME)
-//
-//     output_complete_command(escaped_cmd, fish_options, truncated_description, built_command_output)
+const MAX_DESCRIPTION_WIDTH: usize = 78;
+const TRUNCATION_SUFFIX: &'static str = "…";
 
-// TODO args / arg types?
-fn built_command() {
-    unimplemented!()
+fn last_char_index(string: &str) -> Option<usize> {
+    string.rfind(|_| true)
 }
 
-macro_rules! regex {
-    ($pattern: expr) => {{
-        lazy_static::lazy_static! {
-            static ref REGEX: regex::Regex = regex::Regex::new($pattern).unwrap();
+fn char_len(string: &str) -> usize {
+    string.chars().count()
+}
+
+// TODO args / arg types?
+fn built_command(
+    options: &str,
+    description: &str,
+    built_command_output: &mut Vec<String>,
+    existing_options: &mut HashSet<String>,
+    cmd_name: String,
+) {
+    // TODO
+    let mut fish_options = vec![];
+    for option in regex!(r###"[ ,"=\[\]]]"###).split(options) {
+        let option = regex!(r###"\[.*\]"###).replace_all(option, "");
+        let option = regex!(
+            r###"(?x)
+                ^ [ \t\r\n\[\](){}.,:!]
+                | [ \t\r\n\[\](){}.,:!] $
+            "###
+        )
+        .replace_all(&option, "");
+
+        if option == "-" || option == "--" {
+            continue;
         }
-        &REGEX
-    }};
+
+        if regex!(r###"[{}()]"###).is_match(&option) {
+            continue;
+        }
+
+        let (fish_opt, num_dashes) = if option.starts_with("--") {
+            ("l", 2)
+        } else if option.starts_with("-") {
+            (if option.len() == 2 { "s" } else { "o" }, 1)
+        } else {
+            continue;
+        };
+
+        let option = format!(
+            "-{} {}",
+            fish_opt,
+            fish_escape_single_quote(String::from(&option[num_dashes..]))
+        );
+
+        if existing_options.insert(option.clone()) {
+            fish_options.push(option);
+        }
+    }
+
+    if fish_options.is_empty() {
+        return;
+    }
+
+    // TODO Verify this `unwrap` won't panic
+    let sentences = description.replace(r"\'", "'").replace(r"\.", ".");
+
+    let mut sentences = sentences
+        .split(".")
+        .filter(|sentence| !sentence.trim().is_empty());
+
+    let udot = lossy_unicode(b".");
+    let uspace = lossy_unicode(b" ");
+
+    let mut truncated_description =
+        lossy_unicode(&sentences.next().unwrap_or_default().as_bytes()) + &udot[..];
+
+    if char_len(&truncated_description) > MAX_DESCRIPTION_WIDTH {
+        truncated_description.replace_range(
+            last_char_index(&truncated_description).unwrap()..,
+            TRUNCATION_SUFFIX,
+        );
+    } else {
+        for line in sentences {
+            let proposed_description = format!(
+                "{}{}{}{}",
+                truncated_description,
+                uspace,
+                lossy_unicode(&line.as_bytes()),
+                udot,
+            );
+            if char_len(&proposed_description) > MAX_DESCRIPTION_WIDTH {
+                break;
+            }
+            truncated_description = proposed_description;
+        }
+    }
+
+    let truncated_description = fish_escape_single_quote(truncated_description);
+    let escaped_cmd = fish_escape_single_quote(cmd_name);
+
+    output_complete_command(
+        escaped_cmd,
+        fish_options,
+        &truncated_description,
+        built_command_output,
+    );
 }
 
 fn remove_groff_formatting(data: &str) -> String {
